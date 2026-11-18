@@ -32,10 +32,15 @@ jobs:
         run: |
           git checkout -B master origin/master
           git merge upstream/master -m "Merge upstream ponwrt $(git rev-parse --short upstream/master)"
+          # GITHUB_TOKEN cannot push workflow changes; keep this branch's workflows
+          git checkout origin/master -- .github/workflows
+          git commit --amend --no-edit
           git push origin master
 
       - name: Merge upstream into pku-mirror
         run: |
           git checkout -B pku-mirror origin/pku-mirror
           git merge upstream/master -m "Merge upstream ponwrt into pku-mirror ($(git rev-parse --short upstream/master))"
+          git checkout origin/pku-mirror -- .github/workflows
+          git commit --amend --no-edit
           git push origin pku-mirror
