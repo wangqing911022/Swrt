@@ -1,11 +1,11 @@
-name: Release PonWrt
-run-name: Release PonWrt ${{ inputs.tag }}
+name: Release Swrt
+run-name: Release Swrt ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag
+        description: Release tag (e.g. 20261125)
         required: true
         type: string
       prerelease:
@@ -21,19 +21,15 @@ concurrency:
   group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
+env:
+  TARGET_DIR: bin/targets/airoha/an7581
+
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build Swrt firmware
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - an7581
-          - an7583
-
     steps:
       - uses: actions/checkout@v6
 
@@ -56,15 +52,26 @@ jobs:
             libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
             python3 python3-docutils python3-pip python3-ply python3-pyelftools \
             qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
-            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd jq
+
+      - name: Fetch plugin packages
+        run: |
+          set -eu
+          clone_plugin() {
+            [ -d "package/$2" ] && return 0
+            git clone --depth 1 "$1" "package/$2"
+          }
+          clone_plugin https://github.com/sirpdboy/luci-app-taskplan.git luci-app-taskplan
+          clone_plugin https://github.com/permails/luci-app-ttyd.git luci-app-ttyd
+          clone_plugin https://github.com/luanmuc/luci-app-airoha-npu.git luci-app-airoha-npu
 
       - name: Cache downloads
         uses: actions/cache@v4
         with:
           path: dl
-          key: ponwrt-dl-${{ matrix.target }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          key: swrt-dl-${{ hashFiles('feeds.conf.default', 'configs/*.config', 'package/homebox/Makefile') }}
           restore-keys: |
-            ponwrt-dl-${{ matrix.target }}-
+            swrt-dl-
 
       - name: Install feeds
         run: |
@@ -81,30 +88,58 @@ jobs:
             openssl ec -in private-key.pem -pubout -out public-key.pem
           fi
 
-      - name: Configure ${{ matrix.target }}
+      - name: Configure Swrt
         run: |
-          ./scripts/kconfig.pl + \
-            "configs/${{ matrix.target }}.config" \
-            configs/release.config > .config
+          ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+
+          # Build only the three requested devices.
+          sed -i -E '/^CONFIG_TARGET_DEVICE_(PACKAGES_)?airoha_an7581_DEVICE_/d' .config
+          sed -i -E '/^# CONFIG_TARGET_DEVICE_(PACKAGES_)?airoha_an7581_DEVICE_/d' .config
+          cat >> .config <<'EOF'
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=""
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_znxt_zn504xg-d=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_znxt_zn504xg-d=""
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=""
+          EOF
           make defconfig
 
       - name: Download sources
         run: make download -j"$(nproc)"
 
-      - name: Build ${{ matrix.target }}
+      - name: Build Swrt
         run: make -j"$(nproc)"
 
-      - name: Pack ${{ matrix.target }}
+      - name: Pack sysupgrade images
         run: |
-          mkdir release
-          tar --zstd -cf "release/ponwrt-${{ matrix.target }}.tar.zst" \
-            -C bin/targets/airoha "${{ matrix.target }}"
+          set -eu
+          kver=$(jq -r '.linux_kernel.version // empty' "$TARGET_DIR/profiles.json")
+          if [ -z "$kver" ]; then
+            kver=$(sed -n 's/^LINUX_VERSION-\([0-9.]*\) = \.\([0-9]*\)$/\1.\2/p' target/linux/generic/kernel-6.18 | head -n1)
+          fi
+          build_date=$(date -u +%Y%m%d)
+          mkdir -p release
+          while read -r device name; do
+            [ -n "$device" ] || continue
+            image=$(find "$TARGET_DIR" -maxdepth 1 -name "*-${device}-squashfs-sysupgrade.itb" -print -quit)
+            if [ -z "$image" ]; then
+              echo "missing sysupgrade image for $device" >&2
+              exit 1
+            fi
+            cp "$image" "release/Swrt-${name}-${kver}-${build_date}-sysupgrade.itb"
+          done <<'EOF'
+          fiberhome_hg5585f-cu hg5585f-cu
+          znxt_zn504xg-d znxt-zn504xg-d
+          nokia_xg-040g-md-ubi nokia-xg-040g-md-ubi
+          EOF
+          ls -lh release
 
-      - name: Upload ${{ matrix.target }}
+      - name: Upload images
         uses: actions/upload-artifact@v4
         with:
-          name: ponwrt-${{ matrix.target }}
-          path: release/*.tar.zst
+          name: swrt-images
+          path: release/*.itb
           if-no-files-found: error
           retention-days: 7
 
@@ -116,16 +151,15 @@ jobs:
       contents: write
 
     steps:
-      - name: Download firmware archives
+      - name: Download firmware images
         uses: actions/download-artifact@v4
         with:
-          pattern: ponwrt-*
+          name: swrt-images
           path: release
-          merge-multiple: true
 
       - name: Create checksums
         working-directory: release
-        run: sha256sum *.tar.zst > sha256sums
+        run: sha256sum *.itb > sha256sums
 
       - name: Create GitHub release
         env:
@@ -135,11 +169,11 @@ jobs:
         run: |
           args=(
             "$RELEASE_TAG"
-            release/*.tar.zst
+            release/*.itb
             release/sha256sums
             --repo "$GITHUB_REPOSITORY"
             --target "$GITHUB_SHA"
-            --title "PonWrt $RELEASE_TAG"
+            --title "Swrt $RELEASE_TAG"
             --generate-notes
           )
           if [ "$PRERELEASE" = true ]; then
