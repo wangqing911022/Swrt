@@ -30,6 +30,12 @@ define Package/homebox/conffiles
 /etc/config/homebox
 endef
 
+define Build/Prepare
+	rm -rf $(PKG_BUILD_DIR)
+	mkdir -p $(PKG_BUILD_DIR)
+	$(TAR) -xzf $(DL_DIR)/$(PKG_SOURCE) -C $(PKG_BUILD_DIR)
+endef
+
 define Build/Compile
 endef
 
