@@ -95,6 +95,8 @@ jobs:
           # Build only the three requested devices.
           sed -i -E '/^CONFIG_TARGET_DEVICE_(PACKAGES_)?airoha_an7581_DEVICE_/d' .config
           sed -i -E '/^# CONFIG_TARGET_DEVICE_(PACKAGES_)?airoha_an7581_DEVICE_/d' .config
+          # Only build sysupgrade images, not recovery/initramfs images.
+          sed -i -e 's/^CONFIG_TARGET_ROOTFS_INITRAMFS=y/# CONFIG_TARGET_ROOTFS_INITRAMFS is not set/' .config
           cat >> .config <<'EOF'
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=y
           CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=""
