@@ -58,7 +58,7 @@ jobs:
 
       - name: Unpack rootfs
         run: |
-          unsquashfs -d rootfs -no-progress rootfs.sqsh >/dev/null
+          sudo unsquashfs -d rootfs -no-progress rootfs.sqsh >/dev/null
           echo "===== TOTAL ROOTFS ====="
           du -sb rootfs
           echo "===== TOP LEVEL (bytes) ====="
