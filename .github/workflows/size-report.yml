@@ -1,0 +1,79 @@
+name: Size report
+run-name: Size report ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        default: "20261125"
+        type: string
+      asset:
+        description: Release asset name
+        required: true
+        default: "Swrt-hg5585f-cu-6.18.60-20261125-sysupgrade.itb"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools u-boot-tools python3
+
+      - name: Download firmware
+        env:
+          TAG: ${{ inputs.tag }}
+          ASSET: ${{ inputs.asset }}
+        run: |
+          curl -fL --retry 3 -o image.itb "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET}"
+          ls -l image.itb
+
+      - name: FIT layout
+        run: |
+          dumpimage -l image.itb || true
+
+      - name: Extract rootfs
+        run: |
+          python3 - <<'PY'
+          import struct
+          data = open('image.itb', 'rb').read()
+          off = data.find(b'hsqs')
+          assert off > 0, 'squashfs magic not found'
+          fields = struct.unpack_from('<IIIIHHHHHHQQ', data, off + 4)
+          inodes, mkfs, block_size, fragments, comp, block_log, flags, no_ids, major, minor, root_inode, bytes_used = fields
+          print(f'squashfs_offset={off}')
+          print(f'squashfs_bytes_used={bytes_used}')
+          print(f'block_size={block_size} compression={comp}')
+          print(f'image_size={len(data)}')
+          print(f'non_rootfs={len(data) - bytes_used}')
+          open('rootfs.sqsh', 'wb').write(data[off:off + bytes_used])
+          PY
+
+      - name: Unpack rootfs
+        run: |
+          unsquashfs -d rootfs -no-progress rootfs.sqsh >/dev/null
+          echo "===== TOTAL ROOTFS ====="
+          du -sb rootfs
+          echo "===== TOP LEVEL (bytes) ====="
+          du -x -d1 -b rootfs | sort -n
+          echo "===== /usr (bytes) ====="
+          du -x -d1 -b rootfs/usr | sort -n
+          echo "===== /usr/lib (bytes) ====="
+          du -x -d1 -b rootfs/usr/lib 2>/dev/null | sort -n | tail -30
+          echo "===== /usr/share (bytes) ====="
+          du -x -d1 -b rootfs/usr/share 2>/dev/null | sort -n | tail -30
+          echo "===== /usr/bin largest ====="
+          ls -lS rootfs/usr/bin | head -40
+          echo "===== /usr/sbin largest ====="
+          ls -lS rootfs/usr/sbin | head -20
+          echo "===== /usr/lib largest files ====="
+          find rootfs/usr/lib -maxdepth 2 -type f -printf '%s %p\n' 2>/dev/null | sort -n | tail -50
+          echo "===== largest files overall ====="
+          find rootfs -type f -printf '%s %p\n' | sort -n | tail -60
