@@ -62,7 +62,6 @@ jobs:
             git clone --depth 1 "$1" "package/$2"
           }
           clone_plugin https://github.com/sirpdboy/luci-app-taskplan.git luci-app-taskplan
-          clone_plugin https://github.com/permails/luci-app-ttyd.git luci-app-ttyd
           clone_plugin https://github.com/luanmuc/luci-app-airoha-npu.git luci-app-airoha-npu
 
       - name: Cache downloads
@@ -97,6 +96,8 @@ jobs:
           sed -i -E '/^# CONFIG_TARGET_DEVICE_(PACKAGES_)?airoha_an7581_DEVICE_/d' .config
           # Only build sysupgrade images, not recovery/initramfs images.
           sed -i -e 's/^CONFIG_TARGET_ROOTFS_INITRAMFS=y/# CONFIG_TARGET_ROOTFS_INITRAMFS is not set/' .config
+          # Drop UPnP IGD and PCP/NAT-PMP support and their dependencies.
+          sed -i -E '/^CONFIG_PACKAGE_(luci-app-upnp|miniupnpd|miniupnpd-iptables|miniupnpd-nftables|libnatpmp|libminiupnpc|natpmpc|upnpd)=/d' .config
           cat >> .config <<'EOF'
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=y
           CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=""
@@ -131,7 +132,7 @@ jobs:
             fi
             cp "$image" "release/Swrt-${name}-${kver}-${build_date}-sysupgrade.itb"
           done <<'EOF'
-          fiberhome_hg5585f-cu hg5585f-cu
+          fiberhome_hg5585f-cu fiberhome-hg5585f-cu
           znxt_zn504xg-d znxt-zn504xg-d
           nokia_xg-040g-md-ubi nokia-xg-040g-md-ubi
           EOF
