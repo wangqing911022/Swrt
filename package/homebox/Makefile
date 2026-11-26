@@ -44,6 +44,8 @@ define Package/homebox/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/homebox-linux-arm64-musl $(1)/usr/bin/homebox
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/homebox.init $(1)/etc/init.d/homebox
+	$(INSTALL_DIR) $(1)/etc/rc.d
+	$(LN) ../init.d/homebox $(1)/etc/rc.d/S95homebox
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/homebox.config $(1)/etc/config/homebox
 endef
