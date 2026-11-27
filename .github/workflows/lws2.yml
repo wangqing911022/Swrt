@@ -1,0 +1,88 @@
+name: Debug libwebsockets v2
+run-name: Debug libwebsockets v2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lws:
+    name: Build libwebsockets only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd jq
+
+      - name: Fetch plugin packages
+        run: |
+          set -eu
+          clone_plugin() {
+            [ -d "package/$2" ] && return 0
+            git clone --depth 1 "$1" "package/$2"
+          }
+          clone_plugin https://github.com/sirpdboy/luci-app-taskplan.git luci-app-taskplan
+          clone_plugin https://github.com/luanmuc/luci-app-airoha-npu.git luci-app-airoha-npu
+
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      - name: Pin libwebsockets to 4.3.3
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          curl -fsSL --retry 3 -o "$tmp/packages.tar.gz" \
+            https://codeload.github.com/immortalwrt/packages/tar.gz/refs/heads/openwrt-24.10
+          tar -xzf "$tmp/packages.tar.gz" -C "$tmp" --strip-components=1 \
+            packages-openwrt-24.10/libs/libwebsockets
+          rm -rf feeds/packages/libs/libwebsockets
+          cp -a "$tmp/libs/libwebsockets" feeds/packages/libs/libwebsockets
+          sed -i 's/-DISABLE_WERROR=ON/-DDISABLE_WERROR=ON/' feeds/packages/libs/libwebsockets/Makefile
+          ./scripts/feeds update -i packages
+          grep -m1 PKG_VERSION feeds/packages/libs/libwebsockets/Makefile
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      - name: Configure
+        run: |
+          ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          cat >> .config <<'EOF'
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=y
+          EOF
+          make defconfig
+
+      - name: Build tools and toolchain
+        run: |
+          set -o pipefail
+          make tools/compile -j"$(nproc)" 2>&1 | tail -n 5
+          make toolchain/compile -j"$(nproc)" 2>&1 | tail -n 5
+
+      - name: Build libwebsockets (verbose)
+        run: |
+          set -u
+          df -h / | tail -1
+          if make package/feeds/packages/libwebsockets/compile V=s -j1 > /tmp/compile.log 2>&1; then
+            echo "COMPILE OK"
+            tail -n 15 /tmp/compile.log
+          else
+            echo "COMPILE FAILED"
+            tail -c 12000 /tmp/compile.log
+          fi
