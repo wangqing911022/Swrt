@@ -1,0 +1,216 @@
+name: Release Swrt
+run-name: Release Swrt ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. 20261125)
+        required: true
+        type: string
+      prerelease:
+        description: Mark as prerelease
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TARGET_DIR: bin/targets/airoha/an7581
+
+jobs:
+  build:
+    name: Build Swrt firmware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    environment: release
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd jq
+
+      - name: Fetch plugin packages
+        run: |
+          set -eu
+          clone_plugin() {
+            [ -d "package/$2" ] && return 0
+            git clone --depth 1 "$1" "package/$2"
+          }
+          clone_plugin https://github.com/sirpdboy/luci-app-taskplan.git luci-app-taskplan
+          clone_plugin https://github.com/luanmuc/luci-app-airoha-npu.git luci-app-airoha-npu
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: swrt-dl-${{ hashFiles('feeds.conf.default', 'configs/*.config', 'package/homebox/Makefile') }}
+          restore-keys: |
+            swrt-dl-
+
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      # ttyd 1.7.7 calls lws_service() only once, which returns immediately with
+      # libwebsockets 5.x: ttyd exits right after binding the port, so nothing
+      # listens on 7681 and the LuCI terminal is refused. Pin the 4.3.x package
+      # from the openwrt-24.10 branch instead of the feed's 5.1.0.
+      - name: Pin libwebsockets to 4.3.3
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          curl -fsSL --retry 3 -o "$tmp/packages.tar.gz" \
+            https://codeload.github.com/immortalwrt/packages/tar.gz/refs/heads/openwrt-24.10
+          tar -xzf "$tmp/packages.tar.gz" -C "$tmp" --strip-components=1 \
+            packages-openwrt-24.10/libs/libwebsockets
+          rm -rf feeds/packages/libs/libwebsockets
+          cp -a "$tmp/libs/libwebsockets" feeds/packages/libs/libwebsockets
+          # The 24.10 Makefile lost the leading D here and keeps -Werror enabled.
+          sed -i 's/-DISABLE_WERROR=ON/-DDISABLE_WERROR=ON/' feeds/packages/libs/libwebsockets/Makefile
+          # libwebsockets 4.3.3 declares cmake_minimum_required(VERSION 2.8.12),
+          # which CMake 4.x refuses to configure.
+          echo 'CMAKE_OPTIONS += -DCMAKE_POLICY_VERSION_MINIMUM=3.5' >> feeds/packages/libs/libwebsockets/Makefile
+          ./scripts/feeds update -i packages
+          grep -m1 PKG_VERSION feeds/packages/libs/libwebsockets/Makefile
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      - name: Load repository signing key
+        env:
+          PONWRT_APK_PRIVATE_KEY: ${{ secrets.PONWRT_APK_PRIVATE_KEY }}
+        run: |
+          if [ -n "$PONWRT_APK_PRIVATE_KEY" ]; then
+            umask 077
+            printf '%s\n' "$PONWRT_APK_PRIVATE_KEY" > private-key.pem
+            openssl ec -in private-key.pem -pubout -out public-key.pem
+          fi
+
+      - name: Configure Swrt
+        run: |
+          ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+
+          # Build only the three requested devices.
+          sed -i -E '/^CONFIG_TARGET_DEVICE_(PACKAGES_)?airoha_an7581_DEVICE_/d' .config
+          sed -i -E '/^# CONFIG_TARGET_DEVICE_(PACKAGES_)?airoha_an7581_DEVICE_/d' .config
+          # Only build sysupgrade images, not recovery/initramfs images.
+          sed -i -e 's/^CONFIG_TARGET_ROOTFS_INITRAMFS=y/# CONFIG_TARGET_ROOTFS_INITRAMFS is not set/' .config
+          # Drop UPnP IGD and PCP/NAT-PMP support and their dependencies.
+          sed -i -E '/^CONFIG_PACKAGE_(luci-app-upnp|miniupnpd|miniupnpd-iptables|miniupnpd-nftables|libnatpmp|libminiupnpc|natpmpc|upnpd)=/d' .config
+          cat >> .config <<'EOF'
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=""
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_znxt_zn504xg-d=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_znxt_zn504xg-d=""
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=""
+          EOF
+          make defconfig
+
+      - name: Download sources
+        run: make download -j"$(nproc)"
+
+      - name: Build Swrt
+        run: make -j"$(nproc)"
+
+      # The full build hides per-package output; rebuild the failing package
+      # verbosely so the real error shows up in the log.
+      - name: Diagnose libwebsockets failure
+        if: failure()
+        run: |
+          make package/feeds/packages/libwebsockets/compile V=s -j1 > /tmp/lws.log 2>&1 || true
+          tail -c 8000 /tmp/lws.log
+
+      - name: Pack sysupgrade images
+        run: |
+          set -eu
+          kver=$(jq -r '.linux_kernel.version // empty' "$TARGET_DIR/profiles.json")
+          if [ -z "$kver" ]; then
+            kver=$(sed -n 's/^LINUX_VERSION-\([0-9.]*\) = \.\([0-9]*\)$/\1.\2/p' target/linux/generic/kernel-6.18 | head -n1)
+          fi
+          build_date=$(date -u +%Y%m%d)
+          mkdir -p release
+          while read -r device name; do
+            [ -n "$device" ] || continue
+            image=$(find "$TARGET_DIR" -maxdepth 1 -name "*-${device}-squashfs-sysupgrade.itb" -print -quit)
+            if [ -z "$image" ]; then
+              echo "missing sysupgrade image for $device" >&2
+              exit 1
+            fi
+            cp "$image" "release/Swrt-${name}-${kver}-${build_date}-sysupgrade.itb"
+          done <<'EOF'
+          fiberhome_hg5585f-cu fiberhome-hg5585f-cu
+          znxt_zn504xg-d znxt-zn504xg-d
+          nokia_xg-040g-md-ubi nokia-xg-040g-md-ubi
+          EOF
+          ls -lh release
+
+      - name: Upload images
+        uses: actions/upload-artifact@v4
+        with:
+          name: swrt-images
+          path: release/*.itb
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download firmware images
+        uses: actions/download-artifact@v4
+        with:
+          name: swrt-images
+          path: release
+
+      - name: Create checksums
+        working-directory: release
+        run: sha256sum *.itb > sha256sums
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          args=(
+            "$RELEASE_TAG"
+            release/*.itb
+            release/sha256sums
+            --repo "$GITHUB_REPOSITORY"
+            --target "$GITHUB_SHA"
+            --title "Swrt $RELEASE_TAG"
+            --generate-notes
+          )
+          if [ "$PRERELEASE" = true ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
