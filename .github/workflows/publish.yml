@@ -1,0 +1,60 @@
+name: Publish release
+run-name: Publish release ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. 20261127)
+        required: true
+        type: string
+      run_id:
+        description: Build run id to take the artifacts from
+        required: true
+        type: string
+      prerelease:
+        description: Mark as prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download firmware images
+        uses: actions/download-artifact@v4
+        with:
+          name: swrt-images
+          path: release
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Create checksums
+        working-directory: release
+        run: |
+          ls -l
+          sha256sum *.itb > sha256sums
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          args=(
+            "$RELEASE_TAG"
+            release/*.itb
+            release/sha256sums
+            --repo "$GITHUB_REPOSITORY"
+            --title "Swrt $RELEASE_TAG"
+            --generate-notes
+          )
+          if [ "$PRERELEASE" = true ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
