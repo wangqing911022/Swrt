@@ -72,10 +72,30 @@ jobs:
           restore-keys: |
             swrt-dl-
 
-      - name: Install feeds
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      # ttyd 1.7.7 calls lws_service() only once, which returns immediately with
+      # libwebsockets 5.x: ttyd exits right after binding the port, so nothing
+      # listens on 7681 and the LuCI terminal is refused. Pin the 4.3.x package
+      # from the openwrt-24.10 branch instead of the feed's 5.1.0.
+      - name: Pin libwebsockets to 4.3.3
         run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          set -eu
+          tmp=$(mktemp -d)
+          curl -fsSL --retry 3 -o "$tmp/packages.tar.gz" \
+            https://codeload.github.com/immortalwrt/packages/tar.gz/refs/heads/openwrt-24.10
+          tar -xzf "$tmp/packages.tar.gz" -C "$tmp" --strip-components=1 \
+            packages-openwrt-24.10/libs/libwebsockets
+          rm -rf feeds/packages/libs/libwebsockets
+          cp -a "$tmp/libs/libwebsockets" feeds/packages/libs/libwebsockets
+          # The 24.10 Makefile lost the leading D here and keeps -Werror enabled.
+          sed -i 's/-DISABLE_WERROR=ON/-DDISABLE_WERROR=ON/' feeds/packages/libs/libwebsockets/Makefile
+          ./scripts/feeds update -i packages
+          grep -m1 PKG_VERSION feeds/packages/libs/libwebsockets/Makefile
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
 
       - name: Load repository signing key
         env:
