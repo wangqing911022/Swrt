@@ -1,0 +1,113 @@
+name: Debug libwebsockets v4
+run-name: Debug libwebsockets v4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lws:
+    name: Build libwebsockets only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd jq
+
+      - name: Fetch plugin packages
+        run: |
+          set -eu
+          clone_plugin() {
+            [ -d "package/$2" ] && return 0
+            git clone --depth 1 "$1" "package/$2"
+          }
+          clone_plugin https://github.com/sirpdboy/luci-app-taskplan.git luci-app-taskplan
+          clone_plugin https://github.com/luanmuc/luci-app-airoha-npu.git luci-app-airoha-npu
+
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+      - name: Pin libwebsockets to 4.3.3
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          curl -fsSL --retry 3 -o "$tmp/packages.tar.gz" \
+            https://codeload.github.com/immortalwrt/packages/tar.gz/refs/heads/openwrt-24.10
+          tar -xzf "$tmp/packages.tar.gz" -C "$tmp" --strip-components=1 \
+            packages-openwrt-24.10/libs/libwebsockets
+          rm -rf feeds/packages/libs/libwebsockets
+          cp -a "$tmp/libs/libwebsockets" feeds/packages/libs/libwebsockets
+          # The 24.10 Makefile lost the leading D here and keeps -Werror enabled.
+          sed -i 's/-DISABLE_WERROR=ON/-DDISABLE_WERROR=ON/' feeds/packages/libs/libwebsockets/Makefile
+          # libwebsockets 4.3.3 asks for CMake 2.8.12, which CMake 4.x rejects.
+          # This has to go in before the cmake.mk include, appending at the end
+          # of the Makefile does not reach the configure recipe.
+          sed -i 's|^PKG_NAME:=libwebsockets$|PKG_NAME:=libwebsockets\nCMAKE_OPTIONS += -DCMAKE_POLICY_VERSION_MINIMUM=3.5|' \
+            feeds/packages/libs/libwebsockets/Makefile
+          # Belt and braces: raise the minimum the source itself declares.
+          printf '%s\n' \
+            '--- a/CMakeLists.txt' \
+            '+++ b/CMakeLists.txt' \
+            '@@ -22,7 +22,7 @@' \
+            ' # IN THE SOFTWARE.' \
+            ' #' \
+            ' ' \
+            '-cmake_minimum_required(VERSION 2.8.12)' \
+            '+cmake_minimum_required(VERSION 3.5)' \
+            ' include(CheckFunctionExists)' \
+            ' include(CheckSymbolExists)' \
+            ' include(CheckIncludeFile)' \
+            > feeds/packages/libs/libwebsockets/patches/130-cmake-3.5-min.patch
+          ./scripts/feeds update -i packages
+          grep -m1 PKG_VERSION feeds/packages/libs/libwebsockets/Makefile
+          grep -n CMAKE_POLICY_VERSION_MINIMUM feeds/packages/libs/libwebsockets/Makefile
+          grep -c 'cmake_minimum_required(VERSION 3.5)' feeds/packages/libs/libwebsockets/patches/130-cmake-3.5-min.patch
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      - name: Configure
+        run: |
+          ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          cat >> .config <<'EOF'
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu=y
+          EOF
+          make defconfig
+
+      - name: Show pinned package bits
+        run: |
+          sed -n '8,14p' feeds/packages/libs/libwebsockets/Makefile
+          echo ---
+          cat feeds/packages/libs/libwebsockets/patches/130-cmake-3.5-min.patch
+
+      - name: Build tools and toolchain
+        run: |
+          set -o pipefail
+          make tools/compile -j"$(nproc)" 2>&1 | tail -n 5
+          make toolchain/compile -j"$(nproc)" 2>&1 | tail -n 5
+
+      - name: Build libwebsockets (verbose)
+        run: |
+          if make package/feeds/packages/libwebsockets/compile V=s -j1 > /tmp/compile.log 2>&1; then
+            echo "COMPILE OK"
+            grep -n "CMAKE_POLICY_VERSION_MINIMUM" /tmp/compile.log | head -n 3
+          else
+            echo "COMPILE FAILED"
+            tail -c 12000 /tmp/compile.log
+          fi
