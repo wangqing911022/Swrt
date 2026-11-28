@@ -149,6 +149,9 @@ jobs:
           EOF
           make defconfig
 
+          echo "===== version and feed configuration ====="
+          grep -E '^CONFIG_(IMAGEOPT|VERSIONOPT|VERSION_DIST|VERSION_REPO|FEED_)' .config || true
+
       - name: Download sources
         run: make download -j"$(nproc)"
 
